@@ -67,6 +67,9 @@ impl slang_ui::Hook for App {
 fn cmd_to_ivlcmd(cmd: &Cmd) -> Result<IVLCmd> {
     match &cmd.kind {
         CmdKind::Assert { condition, .. } => Ok(IVLCmd::assert(condition, "Assert might fail!")),
+        CmdKind::Assume { condition } => Ok(IVLCmd::assume(condition)),
+        CmdKind::Assignment { name, expr } => Ok(IVLCmd::assign(name, expr)),
+        CmdKind::Seq(c1, c2) => Ok(IVLCmd::seq(&cmd_to_ivlcmd(c1)?, &cmd_to_ivlcmd(c2)?)),
         _ => todo!("Not supported (yet)."),
     }
 }
