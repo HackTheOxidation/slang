@@ -76,9 +76,19 @@ fn cmd_to_ivlcmd(cmd: &Cmd) -> Result<IVLCmd> {
 
 // Weakest precondition of (assert-only) IVL programs comprised of a single
 // assertion
-fn wp(ivl: &IVLCmd, _: &Expr) -> Result<(Expr, String)> {
+fn wp(ivl: &IVLCmd, g: &Expr) -> Result<(Expr, String)> {
     match &ivl.kind {
-        IVLCmdKind::Assert { condition, message } => Ok((condition.clone(), message.clone())),
-        _ => todo!("Not supported (yet)."),
+        IVLCmdKind::Assert { condition, message } => Ok((Expr::and(&condition, &g), message.clone())),
+        IVLCmdKind::Assume { condition } => Ok((Expr::imp(&condition, &g), format!("Assume {}", condition))),
+        IVLCmdKind::Seq(c1, c2) => {
+            let (wp_c2, _) = wp(c2, g)?;
+            wp(c1, &wp_c2)
+        },
+        IVLCmdKind::NonDet(c1, c2) => {
+            let (wp_c1, _) = wp(c1, g)?;
+            let (wp_c2, _) = wp(c2, g)?;
+            Ok((Expr::and(&wp_c1, &wp_c2), "NonDet".to_string()))
+        },
+        _ => todo!("{}", format!("{} - Not supported (yet).", ivl)),
     }
 }
