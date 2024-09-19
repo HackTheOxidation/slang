@@ -70,6 +70,21 @@ fn cmd_to_ivlcmd(cmd: &Cmd) -> Result<IVLCmd> {
         CmdKind::Assume { condition } => Ok(IVLCmd::assume(condition)),
         CmdKind::Assignment { name, expr } => Ok(IVLCmd::assign(name, expr)),
         CmdKind::Seq(c1, c2) => Ok(IVLCmd::seq(&cmd_to_ivlcmd(c1)?, &cmd_to_ivlcmd(c2)?)),
+        CmdKind::Match { body } => {
+            Ok(IVLCmd::nondets(
+                    &body.cases
+                    .iter()
+                    .cloned()
+                    .map(|case| {
+                        if let Ok(encoding) = cmd_to_ivlcmd(&case.cmd) {
+                            IVLCmd::seq(&IVLCmd::assume(&case.condition), &encoding)
+                        } else {
+                            IVLCmd::unreachable()
+                        }
+                    })
+                    .collect::<Vec<IVLCmd>>()
+                    .as_slice()))
+        },
         _ => todo!("Not supported (yet)."),
     }
 }
