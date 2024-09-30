@@ -2,7 +2,7 @@ pub mod ivl;
 mod ivl_ext;
 
 use ivl::{IVLCmd, IVLCmdKind};
-use slang::ast::{Cmd, CmdKind, Expr};
+use slang::ast::{Cmd, CmdKind, Expr, Ident};
 use slang_ui::prelude::*;
 
 pub struct App;
@@ -62,13 +62,23 @@ impl slang_ui::Hook for App {
     }
 }
 
+// Transforms a command, C, into Dynamic Single Assignment (DSA) form
+fn cmd_to_dsa(cmd: &Cmd) -> &Cmd {
+    cmd
+}
+
 // Encoding of (assert-only) statements into IVL (for programs comprised of only
 // a single assertion)
 fn cmd_to_ivlcmd(cmd: &Cmd) -> Result<IVLCmd> {
+    let cmd = cmd_to_dsa(cmd);
     match &cmd.kind {
         CmdKind::Assert { condition, .. } => Ok(IVLCmd::assert(condition, "Assert might fail!")),
         CmdKind::Assume { condition } => Ok(IVLCmd::assume(condition)),
-        CmdKind::Assignment { name, expr } => Ok(IVLCmd::assign(name, expr)),
+        CmdKind::Assignment { name, expr } => {
+            // TODO: Transform C into DSA (Module 05-04, 5:03)
+            let expr = expr;
+            Ok(IVLCmd::assign(name, expr))
+        },
         CmdKind::Seq(c1, c2) => Ok(IVLCmd::seq(&cmd_to_ivlcmd(c1)?, &cmd_to_ivlcmd(c2)?)),
         CmdKind::Match { body } => {
             Ok(IVLCmd::nondets(
@@ -103,6 +113,12 @@ fn wp(ivl: &IVLCmd, g: &Expr) -> Result<(Expr, String)> {
             let (wp_c1, _) = wp(c1, g)?;
             let (wp_c2, _) = wp(c2, g)?;
             Ok((Expr::and(&wp_c1, &wp_c2), "NonDet".to_string()))
+        },
+        IVLCmdKind::Assignment { name, expr } => {
+            // TODO Passification: encode every assignment as x := e as assume x == e.
+            // (Module 05-04, 5:03)
+            let name = Expr::new_typed(slang::ast::ExprKind::Ident(Ident(name.as_str().to_string())), slang::ast::Type::Bool);
+            wp(&IVLCmd::assume(&name.op(slang::ast::Op::Eq, &expr)), &g)
         },
         _ => todo!("{}", format!("{} - Not supported (yet).", ivl)),
     }
