@@ -86,11 +86,7 @@ fn cmd_to_ivlcmd(cmd: &Cmd) -> Result<IVLCmd> {
                     .iter()
                     .cloned()
                     .map(|case| {
-                        if let Ok(encoding) = cmd_to_ivlcmd(&case.cmd) {
-                            IVLCmd::seq(&IVLCmd::assume(&case.condition), &encoding)
-                        } else {
-                            IVLCmd::unreachable()
-                        }
+                        IVLCmd::seq(&IVLCmd::assume(&case.condition), &cmd_to_ivlcmd(&case.cmd).unwrap())
                     })
                     .collect::<Vec<IVLCmd>>()
                     .as_slice()))
