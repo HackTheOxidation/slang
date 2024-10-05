@@ -3,6 +3,7 @@ mod ivl_ext;
 
 use ivl::{IVLCmd, IVLCmdKind};
 use slang::ast::{Cmd, CmdKind, Expr, Ident};
+use slang_ui::prelude::slang::ast::Specification;
 use slang_ui::prelude::*;
 
 pub struct App;
@@ -78,11 +79,11 @@ fn cmd_to_ivlcmd(cmd: &Cmd) -> Result<IVLCmd> {
             // TODO: Transform C into DSA (Module 05-04, 5:03)
             let expr = expr;
             Ok(IVLCmd::assign(name, expr))
-        },
+        }
         CmdKind::Seq(c1, c2) => Ok(IVLCmd::seq(&cmd_to_ivlcmd(c1)?, &cmd_to_ivlcmd(c2)?)),
         CmdKind::Match { body } => {
             Ok(IVLCmd::nondets(
-                    &body.cases
+                &body.cases
                     .iter()
                     .cloned()
                     .map(|case| {
@@ -90,8 +91,29 @@ fn cmd_to_ivlcmd(cmd: &Cmd) -> Result<IVLCmd> {
                     })
                     .collect::<Vec<IVLCmd>>()
                     .as_slice()))
-        },
-        _ => todo!("Not supported (yet)."),
+        }
+        CmdKind::MethodCall { name, fun_name, method, .. } => {
+            let method = method.get().unwrap();
+            let return_ty = method.return_ty.clone().unwrap().1.clone();
+
+            let requires = method.specifications.iter()
+                .filter_map(|spec| match spec {
+                    Specification::Requires { expr, .. } => Some(expr),
+                    _ => None,
+                }).fold(Expr::bool(true), |acc, e| Expr::and(&acc, e));
+
+            let ensures = method.specifications.iter()
+                .filter_map(|spec| match spec {
+                    Specification::Ensures { expr, .. } => Some(expr),
+                    _ => None,
+                }).fold(Expr::bool(true), |acc, e| Expr::and(&acc, e));
+
+            Ok(IVLCmd::seq(
+                &IVLCmd::assert(&requires,
+                                format!("Asserting pre-condition for method call to: {}", fun_name.as_str()).as_str()),
+                &IVLCmd::seq(&IVLCmd::havoc(&name.clone().unwrap(), &return_ty), &IVLCmd::assume(&ensures))))
+        }
+        _ => todo!("{}", format!("{:?} - Not supported (yet)", cmd.kind)),
     }
 }
 
@@ -104,18 +126,18 @@ fn wp(ivl: &IVLCmd, g: &Expr) -> Result<(Expr, String)> {
         IVLCmdKind::Seq(c1, c2) => {
             let (wp_c2, _) = wp(c2, g)?;
             wp(c1, &wp_c2)
-        },
+        }
         IVLCmdKind::NonDet(c1, c2) => {
             let (wp_c1, _) = wp(c1, g)?;
             let (wp_c2, _) = wp(c2, g)?;
             Ok((Expr::and(&wp_c1, &wp_c2), "NonDet".to_string()))
-        },
+        }
         IVLCmdKind::Assignment { name, expr } => {
             // TODO Passification: encode every assignment as x := e as assume x == e.
             // (Module 05-04, 5:03)
             let name = Expr::new_typed(slang::ast::ExprKind::Ident(Ident(name.as_str().to_string())), slang::ast::Type::Bool);
             wp(&IVLCmd::assume(&name.op(slang::ast::Op::Eq, &expr)), &g)
-        },
+        }
         _ => todo!("{}", format!("{} - Not supported (yet).", ivl)),
     }
 }
