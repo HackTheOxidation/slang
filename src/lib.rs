@@ -3,7 +3,7 @@ mod ivl_ext;
 
 use ivl::{IVLCmd, IVLCmdKind};
 use slang::ast::{Cmd, CmdKind, Expr, Ident};
-use slang_ui::prelude::slang::ast::Specification;
+use slang_ui::prelude::slang::ast::{Name, Type};
 use slang_ui::prelude::*;
 
 pub struct App;
@@ -31,9 +31,16 @@ impl slang_ui::Hook for App {
             let cmd = &m.body.clone().unwrap().cmd;
             // Encode it in IVL
             let ivl = cmd_to_ivlcmd(cmd)?;
+
+            // Determine the post-condition
+            let g = m.ensures()
+                .cloned()
+                .reduce(|a, b| a & b)
+                .unwrap_or(Expr::bool(true));
+
             // Calculate obligation and error message (if obligation is not
             // verified)
-            let (oblig, msg) = wp(&ivl, &Expr::bool(true))?;
+            let (oblig, msg) = wp(&ivl, &g)?;
             // Convert obligation to SMT expression
             let soblig = oblig.smt()?;
 
@@ -73,7 +80,7 @@ fn cmd_to_dsa(cmd: &Cmd) -> &Cmd {
 fn cmd_to_ivlcmd(cmd: &Cmd) -> Result<IVLCmd> {
     let cmd = cmd_to_dsa(cmd);
     match &cmd.kind {
-        CmdKind::Assert { condition, .. } => Ok(IVLCmd::assert(condition, "Assert might fail!")),
+        CmdKind::Assert { condition, message } => Ok(IVLCmd::assert(condition, &message.clone())),
         CmdKind::Assume { condition } => Ok(IVLCmd::assume(condition)),
         CmdKind::Assignment { name, expr } => {
             // TODO: Transform C into DSA (Module 05-04, 5:03)
@@ -96,22 +103,33 @@ fn cmd_to_ivlcmd(cmd: &Cmd) -> Result<IVLCmd> {
             let method = method.get().unwrap();
             let return_ty = method.return_ty.clone().unwrap().1.clone();
 
-            let requires = method.specifications.iter()
-                .filter_map(|spec| match spec {
-                    Specification::Requires { expr, .. } => Some(expr),
-                    _ => None,
-                }).fold(Expr::bool(true), |acc, e| Expr::and(&acc, e));
+            let requires = method.requires().fold(Expr::bool(true), |acc, e| acc.and(e));
+            let ensures = method.ensures().fold(Expr::bool(true), |acc, e| acc.and(e));
 
-            let ensures = method.specifications.iter()
-                .filter_map(|spec| match spec {
-                    Specification::Ensures { expr, .. } => Some(expr),
-                    _ => None,
-                }).fold(Expr::bool(true), |acc, e| Expr::and(&acc, e));
+            let message = format!("Asserting pre-condition for method call to: '{}' - {}:{}", fun_name.as_str(), fun_name.span.start(), fun_name.span.end());
 
             Ok(IVLCmd::seq(
-                &IVLCmd::assert(&requires,
-                                format!("Asserting pre-condition for method call to: {}", fun_name.as_str()).as_str()),
-                &IVLCmd::seq(&IVLCmd::havoc(&name.clone().unwrap(), &return_ty), &IVLCmd::assume(&ensures))))
+                &IVLCmd::assert(&requires, message.as_str()),
+                &IVLCmd::seq(&IVLCmd::havoc(&name.clone().unwrap(), &return_ty),
+                             &IVLCmd::assume(&ensures))))
+        }
+        CmdKind::VarDefinition { name, ty, expr } => {
+            if let Some(expr) = expr {
+                Ok(IVLCmd::assign(&name.clone(), &expr))
+            } else {
+                Ok(IVLCmd::havoc(&name.clone(), &ty.clone().1))
+            }
+        }
+        CmdKind::Return { expr } => {
+            // We assume that the operational semantics of return is simply an assignment
+            // to the result/output variable.
+            let name = Name::ident(Ident(String::from("result")));
+            println!("DEBUG: '{}' has span {}:{}", name, name.span.start(), name.span.end());
+            if let Some(expr) = expr {
+                Ok(IVLCmd::assign(&name, expr))
+            } else {
+                Ok(IVLCmd::havoc(&name, &Type::Unresolved))
+            }
         }
         _ => todo!("{}", format!("{:?} - Not supported (yet)", cmd.kind)),
     }
@@ -121,23 +139,33 @@ fn cmd_to_ivlcmd(cmd: &Cmd) -> Result<IVLCmd> {
 // assertion
 fn wp(ivl: &IVLCmd, g: &Expr) -> Result<(Expr, String)> {
     match &ivl.kind {
-        IVLCmdKind::Assert { condition, message } => Ok((Expr::and(&condition, &g), message.clone())),
-        IVLCmdKind::Assume { condition } => Ok((Expr::imp(&condition, &g), format!("Assume {}", condition))),
+        IVLCmdKind::Assert { condition, message } => Ok((condition.and(&g), format!("Assertion failure: '{}' - {}:{}", message, condition.span.start(), condition.span.end()))),
+        IVLCmdKind::Assume { condition } => Ok((condition.imp(&g), format!("Assume {} - {}:{}", condition, condition.span.start(), condition.span.end()))),
         IVLCmdKind::Seq(c1, c2) => {
             let (wp_c2, _) = wp(c2, g)?;
             wp(c1, &wp_c2)
         }
         IVLCmdKind::NonDet(c1, c2) => {
-            let (wp_c1, _) = wp(c1, g)?;
-            let (wp_c2, _) = wp(c2, g)?;
-            Ok((Expr::and(&wp_c1, &wp_c2), "NonDet".to_string()))
+            let (wp_c1, message_c1) = wp(c1, g)?;
+            let (wp_c2, message_c2) = wp(c2, g)?;
+            Ok((Expr::and(&wp_c1, &wp_c2), format!("NonDet '{} || {}' - {}:{}", message_c1, message_c2, c1.span.start(), c2.span.end())))
         }
         IVLCmdKind::Assignment { name, expr } => {
             // TODO Passification: encode every assignment as x := e as assume x == e.
             // (Module 05-04, 5:03)
-            let name = Expr::new_typed(slang::ast::ExprKind::Ident(Ident(name.as_str().to_string())), slang::ast::Type::Bool);
-            wp(&IVLCmd::assume(&name.op(slang::ast::Op::Eq, &expr)), &g)
+            println!("DEBUG: Assigning {}", name);
+            if name.ident.as_str() == "result" {
+                Ok((g.subst_ident(&name.ident, &Expr::result(&expr.ty)).subst_result(expr), format!("Returning '{}' - {}:{}", expr, name.span.start(), expr.span.end())))
+            } else {
+                Ok((g.subst_ident(&name.ident, expr), format!("Assignment of '{}' to '{}' - {}:{}", name, expr, name.span.start(), expr.span.end())))
+            }
+            //wp(&IVLCmd::assume(&expr.op(Eq, &Expr::ident(&name.ident, &expr.ty.clone()))), &g)
         }
-        _ => todo!("{}", format!("{} - Not supported (yet).", ivl)),
+        IVLCmdKind::Havoc { name, ty: _ty } => {
+            // TODO: Figure out the operational semantics of havoc
+            // (remove "name" from G?)
+            // (Module 05-05, 16:48)
+            Ok((g.clone(), format!("Havoc'ing {}", name)))
+        }
     }
 }
