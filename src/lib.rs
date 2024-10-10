@@ -4,6 +4,7 @@ mod ivl_ext;
 use ivl::{IVLCmd, IVLCmdKind};
 use slang::ast::{Cmd, CmdKind, Expr, Ident};
 use slang_ui::prelude::slang::ast::{Name, Type};
+use slang_ui::prelude::slang::Span;
 use slang_ui::prelude::*;
 
 pub struct App;
@@ -84,7 +85,6 @@ fn cmd_to_ivlcmd(cmd: &Cmd) -> Result<IVLCmd> {
         CmdKind::Assume { condition } => Ok(IVLCmd::assume(condition)),
         CmdKind::Assignment { name, expr } => {
             // TODO: Transform C into DSA (Module 05-04, 5:03)
-            let expr = expr;
             Ok(IVLCmd::assign(name, expr))
         }
         CmdKind::Seq(c1, c2) => Ok(IVLCmd::seq(&cmd_to_ivlcmd(c1)?, &cmd_to_ivlcmd(c2)?)),
@@ -123,8 +123,7 @@ fn cmd_to_ivlcmd(cmd: &Cmd) -> Result<IVLCmd> {
         CmdKind::Return { expr } => {
             // We assume that the operational semantics of return is simply an assignment
             // to the result/output variable.
-            let name = Name::ident(Ident(String::from("result")));
-            println!("DEBUG: '{}' has span {}:{}", name, name.span.start(), name.span.end());
+            let name = Name { span: cmd.span, ident: Ident("result".to_string()) };
             if let Some(expr) = expr {
                 Ok(IVLCmd::assign(&name, expr))
             } else {
@@ -139,26 +138,25 @@ fn cmd_to_ivlcmd(cmd: &Cmd) -> Result<IVLCmd> {
 // assertion
 fn wp(ivl: &IVLCmd, g: &Expr) -> Result<(Expr, String)> {
     match &ivl.kind {
-        IVLCmdKind::Assert { condition, message } => Ok((condition.and(&g), format!("Assertion failure: '{}' - {}:{}", message, condition.span.start(), condition.span.end()))),
-        IVLCmdKind::Assume { condition } => Ok((condition.imp(&g), format!("Assume {} - {}:{}", condition, condition.span.start(), condition.span.end()))),
-        IVLCmdKind::Seq(c1, c2) => {
-            let (wp_c2, _) = wp(c2, g)?;
-            wp(c1, &wp_c2)
-        }
+        IVLCmdKind::Assert { condition, message } =>
+            Ok((condition.and(&g).with_span(condition.span), format!("Assertion failure: '{}' - {}:{}", message, condition.span.start(), condition.span.end()))),
+        IVLCmdKind::Assume { condition } =>
+            Ok((condition.imp(&g).with_span(condition.span), format!("Assume {} - {}:{}", condition, condition.span.start(), condition.span.end()))),
+        IVLCmdKind::Seq(c1, c2) => wp(c2, g).and_then(|(wp_c2, _)| wp(c1, &wp_c2)),
         IVLCmdKind::NonDet(c1, c2) => {
-            let (wp_c1, message_c1) = wp(c1, g)?;
-            let (wp_c2, message_c2) = wp(c2, g)?;
-            Ok((Expr::and(&wp_c1, &wp_c2), format!("NonDet '{} || {}' - {}:{}", message_c1, message_c2, c1.span.start(), c2.span.end())))
+            let (wp_c1, message_c1) = wp(c1, &g.with_span(c1.span))?;
+            let (wp_c2, message_c2) = wp(c2, &g.with_span(c2.span))?;
+            Ok((wp_c1.and(&wp_c2), format!("NonDet '{} || {}'", message_c1, message_c2)))
         }
         IVLCmdKind::Assignment { name, expr } => {
             // TODO Passification: encode every assignment as x := e as assume x == e.
             // (Module 05-04, 5:03)
-            println!("DEBUG: Assigning {}", name);
-            if name.ident.as_str() == "result" {
-                Ok((g.subst_ident(&name.ident, &Expr::result(&expr.ty)).subst_result(expr), format!("Returning '{}' - {}:{}", expr, name.span.start(), expr.span.end())))
+            let out_expr = if name.ident.as_str() == "result" {
+                g.subst_ident(&name.ident, &Expr::result(&expr.ty)).subst_result(expr)
             } else {
-                Ok((g.subst_ident(&name.ident, expr), format!("Assignment of '{}' to '{}' - {}:{}", name, expr, name.span.start(), expr.span.end())))
-            }
+                g.subst_ident(&name.ident, expr)
+            };
+            Ok((out_expr.with_span(Span::from_start_end(name.span.start(), expr.span.end())), format!("Assignment of '{}' to '{}'", name, expr)))
             //wp(&IVLCmd::assume(&expr.op(Eq, &Expr::ident(&name.ident, &expr.ty.clone()))), &g)
         }
         IVLCmdKind::Havoc { name, ty: _ty } => {
