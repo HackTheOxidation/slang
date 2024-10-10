@@ -36,7 +36,7 @@ impl slang_ui::Hook for App {
             // Determine the post-condition
             let g = m.ensures()
                 .cloned()
-                .reduce(|a, b| a & b)
+                .reduce(|a, b| (a & b.clone()).with_span(b.span))
                 .unwrap_or(Expr::bool(true));
 
             // Calculate obligation and error message (if obligation is not
@@ -117,6 +117,7 @@ fn cmd_to_ivlcmd(cmd: &Cmd) -> Result<IVLCmd> {
             if let Some(expr) = expr {
                 Ok(IVLCmd::assign(&name.clone(), &expr))
             } else {
+                println!("Triggering Havoc for name: {}", name);
                 Ok(IVLCmd::havoc(&name.clone(), &ty.clone().1))
             }
         }
@@ -138,15 +139,19 @@ fn cmd_to_ivlcmd(cmd: &Cmd) -> Result<IVLCmd> {
 // assertion
 fn wp(ivl: &IVLCmd, g: &Expr) -> Result<(Expr, String)> {
     match &ivl.kind {
-        IVLCmdKind::Assert { condition, message } =>
-            Ok((condition.and(&g).with_span(condition.span), format!("Assertion failure: '{}' - {}:{}", message, condition.span.start(), condition.span.end()))),
+        IVLCmdKind::Assert { condition, .. } =>
+            Ok((condition.and(&g).with_span(condition.span), format!("Assert might fail. Assertion {} might not hold.", condition))),
         IVLCmdKind::Assume { condition } =>
-            Ok((condition.imp(&g).with_span(condition.span), format!("Assume {} - {}:{}", condition, condition.span.start(), condition.span.end()))),
-        IVLCmdKind::Seq(c1, c2) => wp(c2, g).and_then(|(wp_c2, _)| wp(c1, &wp_c2)),
+            Ok((condition.imp(&g).with_span(condition.span), format!("Assuming {}", condition))),
+        IVLCmdKind::Seq(c1, c2) => wp(c2, &g).and_then(|(wp_c2, message2)| {
+            let (wp_c1, message1) = wp(c1, &wp_c2).unwrap();
+            let message = if let IVLCmdKind::Assert { .. } = c1.kind { message1 } else { message2 };
+            Ok((wp_c1.with_span(wp_c2.span), message))
+        }),
         IVLCmdKind::NonDet(c1, c2) => {
             let (wp_c1, message_c1) = wp(c1, &g.with_span(c1.span))?;
             let (wp_c2, message_c2) = wp(c2, &g.with_span(c2.span))?;
-            Ok((wp_c1.and(&wp_c2), format!("NonDet '{} || {}'", message_c1, message_c2)))
+            Ok((wp_c1.and(&wp_c2).with_span(wp_c1.span), format!("'{}' or '{}'", message_c1, message_c2)))
         }
         IVLCmdKind::Assignment { name, expr } => {
             // TODO Passification: encode every assignment as x := e as assume x == e.
@@ -163,7 +168,8 @@ fn wp(ivl: &IVLCmd, g: &Expr) -> Result<(Expr, String)> {
             // TODO: Figure out the operational semantics of havoc
             // (remove "name" from G?)
             // (Module 05-05, 16:48)
-            Ok((g.clone(), format!("Havoc'ing {}", name)))
+            wp(&IVLCmd::assign(&name, &Expr::ident(&name.ident.postfix("0"), _ty).with_span(Span::from_start_end(g.span.start(), g.span.end()))), &g)
+            //Ok((g.clone(), format!("Havoc'ing {}", name)))
         }
     }
 }
